@@ -5,20 +5,33 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 )
 
 const (
-	clientID     = "11e5eed30dc64bf9beb4da71653ca058"
-	clientSecret = "a6929a7d37304776b1730e182623c0d6"
 	redirectURI  = "http://localhost:8888/callback"
 	scope        = "user-read-private user-read-email"
 	authEndpoint = "https://accounts.spotify.com/authorize"
 	tokenEndpoint = "https://accounts.spotify.com/api/token"
 	frontendURI = "http://localhost:5151/dashboard"
 )
+
+var (
+	clientID string
+	clientSecret string
+)
+
+func init() {
+	if err := godotenv.Load(); err != nil {
+		fmt.Println("Error loading .env file")
+	}
+	clientID = os.Getenv("SPOTIFY_CLIENT_ID")
+	clientSecret = os.Getenv("SPOTIFY_CLIENT_SECRET")
+}
 
 func main() {
 	r := mux.NewRouter()
@@ -54,7 +67,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func setupHandler(w http.ResponseWriter, r *http.Request) {
-	// Redirect the user to Spotify authorization endpoint
 	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&scope=%s&redirect_uri=%s",
 		authEndpoint, clientID, scope, redirectURI)
 
@@ -66,11 +78,9 @@ func setupHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
-	// Redirect the user to Spotify authorization endpoint
 	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&scope=%s&redirect_uri=%s",
 		authEndpoint, clientID, scope, redirectURI)
 
-		//    w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -109,6 +119,7 @@ func exchangeCodeForToken(code string) (string, error) {
 
     // Replace the following code with your actual implementation
     // and handle the response to extract the access token
+
     resp, err := http.PostForm(tokenEndpoint, url.Values{
         "grant_type":    {"authorization_code"},
         "code":          {code},
@@ -146,8 +157,7 @@ func exchangeCodeForToken(code string) (string, error) {
 // )
 
 // const (
-// 	clientID     = "11e5eed30dc64bf9beb4da71653ca058"
-// 	clientSecret = "a6929a7d37304776b1730e182623c0d6"
+
 // 	redirectURI   = "http://localhost:8888/callback"
 // 	authEndpoint  = "https://accounts.spotify.com/authorize"
 // 	tokenEndpoint = "https://accounts.spotify.com/api/token"
