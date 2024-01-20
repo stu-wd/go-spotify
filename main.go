@@ -3,17 +3,21 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+	"github.com/labstack/echo/v5"
+	"github.com/pocketbase/pocketbase"
+	"github.com/pocketbase/pocketbase/apis"
+	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/cron"
 )
 
 const (
-	redirectURI  = "http://localhost:8888/callback"
+	callbackURL  = "http://localhost:8090/callback"
 	scope        = "user-read-private user-read-email user-top-read playlist-read-private playlist-read-collaborative"
 	authEndpoint = "https://accounts.spotify.com/authorize"
 	tokenEndpoint = "https://accounts.spotify.com/api/token"
@@ -24,9 +28,21 @@ type AuthorizationResponse struct {
 	AuthorizationURL string `json:"authorizationURL"`
 }
 
+// TokenResponse represents the response structure containing access token and refresh token
+type TokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+type RefreshTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
 var (
 	clientID string
 	clientSecret string
+	accessToken string
+	refreshToken string
 )
 
 func init() {
@@ -36,90 +52,95 @@ func init() {
 	clientID = os.Getenv("SPOTIFY_CLIENT_ID")
 	clientSecret = os.Getenv("SPOTIFY_CLIENT_SECRET")
 }
-
 func main() {
-	r := mux.NewRouter()
+    app := pocketbase.New()
 
-	r.HandleFunc("/setup", setupHandler).Methods("GET")
+    // serves static files from the provided public dir (if exists)
+    app.OnBeforeServe().Add(func(e *core.ServeEvent) error {
+        e.Router.GET("/*", apis.StaticDirectoryHandler(os.DirFS("./pb_public"), false))
 
-	// Handle the /callback route
-	r.HandleFunc("/callback", callbackHandler).Methods("GET")
+		scheduler := cron.New()
 
-	// Handle the /health route
-	r.HandleFunc("/health", healthHandler).Methods("GET")
+		scheduler.MustAdd("getStuToken", "*/1 * * * *", func() {
+			err := refreshStuTokenJob()
+			if err != nil {
+				fmt.Println("Error refreshing token: ", err)
+			}
+		})
 
-	corsHandler := handlers.CORS(
-		handlers.AllowedHeaders([]string{"Content-Type"}),
-		handlers.AllowedMethods([]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}),
-		handlers.AllowedOrigins([]string{"*"}), // Adjust this according to your frontend's actual domain
-	)
+		scheduler.Start()
 
-	http.Handle("/", corsHandler(r))
+		e.Router.GET("/setup", func(c echo.Context)error {
+			authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&scope=%s&redirect_uri=%s",
+				authEndpoint, clientID, scope, callbackURL)
 
-	fmt.Println("Starting server GIZZ....")
+			return c.Redirect(307, authURL)
+		})
 
-	// Start the server
-	http.ListenAndServe(":8888", nil)
-}
+		e.Router.GET("/callback", func(c echo.Context) error {
+			code := c.QueryParam("code")
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "API is live")
-}
+			accessToken, err := exchangeStuCodeForToken(code)
 
-func setupHandler(w http.ResponseWriter, r *http.Request) {
-	authURL := fmt.Sprintf("%s?response_type=code&client_id=%s&scope=%s&redirect_uri=%s",
-		authEndpoint, clientID, scope, redirectURI)
+			if err != nil {
+				c.Error(err)
+			}
 
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			redirectURL := fmt.Sprintf("%s?access_token=%s", frontendURI, accessToken)
 
-	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
-}
+			return c.Redirect(307, redirectURL)
+		})
 
-func callbackHandler(w http.ResponseWriter, r *http.Request) {
-    // Retrieve the authorization code from the query parameters
-    code := r.URL.Query().Get("code")
+        return nil
+    })
 
-    // Validate state if needed
-
-    // Exchange the authorization code for an access token
-    accessToken, err := exchangeStuCodeForToken(code)
-    if err != nil {
-        // Handle the error
-        http.Error(w, "Failed to exchange code for token stu callback", http.StatusInternalServerError)
-        return
+    if err := app.Start(); err != nil {
+        log.Fatal(err)
     }
+}
 
-	redirectURL := fmt.Sprintf("%s?access_token=%s", frontendURI, accessToken)
+func refreshStuTokenJob() error {
+	resp, err := http.PostForm(tokenEndpoint, url.Values{
+		"grant_type": {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id": {clientID},
+		"client_secret": {clientSecret},
+	})
 
-	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	var refreshTokenResponse RefreshTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&refreshTokenResponse); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func exchangeStuCodeForToken(code string) (string, error) {
-    resp, err := http.PostForm(tokenEndpoint, url.Values{
-        "grant_type":    {"authorization_code"},
-        "code":          {code},
-        "redirect_uri":  {redirectURI},
-        "client_id":     {clientID},
-        "client_secret": {clientSecret},
-    })
-    if err != nil {
-        return "", err
-    }
-    defer resp.Body.Close()
+	resp, err := http.PostForm(tokenEndpoint, url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {callbackURL},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+	})
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()	
 
-    // Parse the response body to extract the access token
-    var tokenResponse map[string]interface{}
-    if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
-        return "", err
-    }
+	var tokenResponse TokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
+		return "", err
+	}
 
-    accessToken, ok := tokenResponse["access_token"].(string)
-    if !ok {
-        return "", fmt.Errorf("Access token not found in the response")
-    }
+	accessToken = tokenResponse.AccessToken
+	refreshToken = tokenResponse.RefreshToken
 
-    return accessToken, nil
+	return accessToken, nil
 }
