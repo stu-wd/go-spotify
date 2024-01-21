@@ -35,14 +35,12 @@ type TokenResponse struct {
 }
 type RefreshTokenResponse struct {
 	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
 }
 
 var (
 	clientID string
 	clientSecret string
-	accessToken string
-	refreshToken string
+	id string
 )
 
 func init() {
@@ -51,18 +49,20 @@ func init() {
 	}
 	clientID = os.Getenv("SPOTIFY_CLIENT_ID")
 	clientSecret = os.Getenv("SPOTIFY_CLIENT_SECRET")
+	id = os.Getenv("STUSER_RECORD_ID")
 }
 func main() {
     app := pocketbase.New()
 
     // serves static files from the provided public dir (if exists)
     app.OnBeforeServe().Add(func(e *core.ServeEvent) error {
+
         e.Router.GET("/*", apis.StaticDirectoryHandler(os.DirFS("./pb_public"), false))
 
 		scheduler := cron.New()
 
-		scheduler.MustAdd("getStuToken", "*/1 * * * *", func() {
-			err := refreshStuTokenJob()
+		scheduler.MustAdd("getStuToken", "*/55 * * * *", func() {
+			err := refreshStuTokenJob(app)
 			if err != nil {
 				fmt.Println("Error refreshing token: ", err)
 			}
@@ -80,7 +80,7 @@ func main() {
 		e.Router.GET("/callback", func(c echo.Context) error {
 			code := c.QueryParam("code")
 
-			accessToken, err := exchangeStuCodeForToken(code)
+			accessToken, err := exchangeStuCodeForToken(code, app)
 
 			if err != nil {
 				c.Error(err)
@@ -97,12 +97,19 @@ func main() {
     if err := app.Start(); err != nil {
         log.Fatal(err)
     }
+
 }
 
-func refreshStuTokenJob() error {
+func refreshStuTokenJob(app core.App) error {
+	record, err := app.Dao().FindRecordById("stuser", id)
+
+	if err != nil {
+		return err
+	}
+
 	resp, err := http.PostForm(tokenEndpoint, url.Values{
 		"grant_type": {"refresh_token"},
-		"refresh_token": {refreshToken},
+		"refresh_token": {record.GetString("refresh_token")},
 		"client_id": {clientID},
 		"client_secret": {clientSecret},
 	})
@@ -118,10 +125,16 @@ func refreshStuTokenJob() error {
 		return err
 	}
 
+	record.Set("access_token", refreshTokenResponse.AccessToken)
+
+	if err := app.Dao().SaveRecord(record); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func exchangeStuCodeForToken(code string) (string, error) {
+func exchangeStuCodeForToken(code string, app core.App) (string, error) {
 	resp, err := http.PostForm(tokenEndpoint, url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -139,8 +152,18 @@ func exchangeStuCodeForToken(code string) (string, error) {
 		return "", err
 	}
 
-	accessToken = tokenResponse.AccessToken
-	refreshToken = tokenResponse.RefreshToken
+	record, err := app.Dao().FindRecordById("stuser", id)
 
-	return accessToken, nil
+	if err != nil {
+		return "", err
+	}
+
+	record.Set("access_token", tokenResponse.AccessToken)
+	record.Set("refresh_token", tokenResponse.RefreshToken)
+
+	if err := app.Dao().SaveRecord(record); err != nil {
+		return "", err
+	}
+
+	return tokenResponse.AccessToken, nil
 }
